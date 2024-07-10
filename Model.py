@@ -7,11 +7,14 @@ from torch.nn import functional as F
 # Hyper Parameter 
 batch_size = 32
 block_size = 64
-max_iters = 3000
+max_iters = 5000
 learning_rate= 1e-2
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 eval_iters = 200
 n_embd = 384
+n_head = 6
+n_layer = 6
+dropout = 0.2
 eval_interval = 500
 
 torch.manual_seed(1337)
@@ -105,6 +108,71 @@ def estimate_loss():
     model.train()
     return out
 
+class Head(nn.Module):
+    """"Attention Vectors"""
+    def __init__(self, head_size):
+        super().__init__()
+        self.key = nn.Linear(n_embd, head_size, bias = False)
+        self.query = nn.Linear(n_embd, head_size, bias = False)
+        self.value = nn.Linear(n_embd, head_size, bias = False)
+        self.register_buffer('tril', torch.tril(torch.ones(block_size,block_size)))
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        B,T,C = x.shape
+        k = self.key(x) # (B,T,C)
+        q = self.query(x) # (B,T,C)
+        # Compute attention scores ("affinities")
+        wei = q @ k.transpose(-2,-1) * C **-0.5 # (B,T,C) @ (B,T,C) ----> (B,T,T)
+        wei = wei.masked_fill(self.tril[:T, :T]==0, float('-inf')) # Masking the upper half of triangle so it doesnt communicate with past
+        wei = F.softmax(wei, dim=-1) # (B,T,T)
+        wei = self.dropout(wei)
+        v = self.value(x)
+        out = wei @ v # (B,T,T) @ (B, T, C) -----> (B,T,C)
+        return out
+
+class MultiheadAttention(nn.Module):
+    """Multiple heads of self-attention in parallels for better communication"""
+
+    def __init__(self, num_heads, head_size):
+        super().__init__()
+        self.heads = nn.ModuleList([Head(head_size) for __ in range(num_heads)])
+        self.proj = nn.Linear(n_embd, n_embd)
+        # self.proj = nn.Linear(head_seize * num_heads, n_embd)
+        self.dropout = nn.Dropout(dropout)
+    
+
+    def forward(self, x):
+        out = torch.cat([h(x) for h in self.heads], dim=-1)
+        out = self.proj(out)
+        return out
+
+
+class FeedForward(nn.Module):
+    """Simple Feed Forward Network"""
+    def __init__(self, n_embd):
+        super().__init__()
+        self.net = nn.Sequential(nn.Linear(n_embd, 4 * n_embd), nn.ReLU(),nn.Linear(4 * n_embd, n_embd), nn.Dropout(dropout), )
+    
+    def forward(self, x):
+        return self.net(x)
+    
+class Block(nn.Module):
+    """Transformer Block: Communication followed by computation"""
+    def __init__(self, n_embd, n_head):
+        ## n_embd : Embeddings dimension, n_nead: number of heads we would like
+        super().__init__()
+        head_size = n_embd // n_head
+        self.sa = MultiheadAttention(n_head, head_size)
+        self.ffwd = FeedForward(n_embd)
+        self.ln1 = nn.LayerNorm(n_embd)
+        self.ln2 = nn.LayerNorm(n_embd)
+
+    def forward(self,x):
+        x = x + self.sa(self.ln1(x))
+        x = x + self.ffwd(self.ln2(x))
+        return x
+    
 
 # Simple Bigram Model
 class BigramLanguageModel(nn.Module):
@@ -115,13 +183,39 @@ class BigramLanguageModel(nn.Module):
         #each token directly reads off the logits for the next token from Lookup table
         self.token_embeddings_table = nn.Embedding(vocab_size, n_embd)
         self.position_embeddings_table = nn.Embedding(block_size, n_embd)
+        self.blocks = nn.Sequential(
+            Block(n_embd, n_head=4),
+            Block(n_embd, n_head=4),
+            Block(n_embd, n_head=4),
+            nn.LayerNorm(n_layer)
+        )
+        self.ln_f = nn.LayerNorm(n_embd) # Final layer norm
         self.lm_head = nn.Linear(n_embd, vocab_size)
+        # self.sa_head = MultiheadAttention(4,n_embd//4) ## i.e.  heads of 8 dimensional self-attention vectors
+        # self.ffwd = FeedForward(n_embd) Already included in Blocks block
+
+        self.apply(self._init_weights) # not in Tutorial
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+        
 
     def forward(self, idx, targets=None):
         B,T = idx.shape
+
+        # idx and targets are both (B,T) tensor of integer
         tok_emb = self.token_embeddings_table(idx)
-        pos_emb = self.position_embeddings_table(torch.arange(T, device = device))
+        pos_emb = self.position_embeddings_table(torch.arange(T, device = device)) # T,C
         x = tok_emb + pos_emb #(B,T,C)
+        # x = self.sa_head(x) ## Apply one head of self attention
+        # x = self.ffwd(x)
+
+        x = self.blocks(x)
         logits = self.lm_head(x) # (B, T)
         # Here Batch is 4, time is 8, channel is vocab_size = 65
         # loss = F.cross_entropy(logits, targets)
@@ -139,13 +233,10 @@ class BigramLanguageModel(nn.Module):
     def generate(self, idx, max_new_tokens):
         # idx is (B,T) array of indices in the current context
         for _ in range(max_new_tokens):
-            # Temporary fix 
-            T = idx.size(1)
-            if T > block_size:
-                idx = idx[:,-block_size:]
-            
+            # crop idx to last block_size_token
+            idx_cond = idx[:,-block_size:]
             # get the prediction
-            logits, loss = self(idx)
+            logits, loss = self(idx_cond)
             ## Focus only on last step/layer
             logits = logits[:,-1,:] # becomes (B,C)
             # apply softmax to get probabilities
@@ -161,6 +252,8 @@ class BigramLanguageModel(nn.Module):
 # Technically Logits are the predictions and BigramLAnguageModel is just simple Neural network with Forward pass    
 model = BigramLanguageModel()
 m = model.to(device)
+# print the number of parameters in the model
+print(sum(p.numel() for p in m.parameters())/1e6, 'M parameters')
 # logits, loss = m(xb, yb)
 # print(logits.shape)
 # print(loss)
