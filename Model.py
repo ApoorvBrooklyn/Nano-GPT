@@ -6,7 +6,7 @@ from torch.nn import functional as F
 
 # Hyper Parameter 
 batch_size = 32
-block_size = 8
+block_size = 64
 max_iters = 3000
 learning_rate= 1e-2
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -122,7 +122,7 @@ class BigramLanguageModel(nn.Module):
         tok_emb = self.token_embeddings_table(idx)
         pos_emb = self.position_embeddings_table(torch.arange(T, device = device))
         x = tok_emb + pos_emb #(B,T,C)
-        logits = self.lm_head(idx) # (B, T)
+        logits = self.lm_head(x) # (B, T)
         # Here Batch is 4, time is 8, channel is vocab_size = 65
         # loss = F.cross_entropy(logits, targets)
         # Above is actual method but in doc we will find that F.cross expects Channel as Second input here we have it as third 
@@ -139,6 +139,11 @@ class BigramLanguageModel(nn.Module):
     def generate(self, idx, max_new_tokens):
         # idx is (B,T) array of indices in the current context
         for _ in range(max_new_tokens):
+            # Temporary fix 
+            T = idx.size(1)
+            if T > block_size:
+                idx = idx[:,-block_size:]
+            
             # get the prediction
             logits, loss = self(idx)
             ## Focus only on last step/layer
