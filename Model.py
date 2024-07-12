@@ -123,7 +123,7 @@ class Head(nn.Module):
         k = self.key(x) # (B,T,C)
         q = self.query(x) # (B,T,C)
         # Compute attention scores ("affinities")
-        wei = q @ k.transpose(-2,-1) * C **-0.5 # (B,T,C) @ (B,T,C) ----> (B,T,T)
+        wei = q @ k.transpose(-2,-1) * k.shape[-1] **-0.5 # (B,T,C) @ (B,T,C) ----> (B,T,T)
         wei = wei.masked_fill(self.tril[:T, :T]==0, float('-inf')) # Masking the upper half of triangle so it doesnt communicate with past
         wei = F.softmax(wei, dim=-1) # (B,T,T)
         wei = self.dropout(wei)
@@ -137,14 +137,14 @@ class MultiheadAttention(nn.Module):
     def __init__(self, num_heads, head_size):
         super().__init__()
         self.heads = nn.ModuleList([Head(head_size) for __ in range(num_heads)])
-        self.proj = nn.Linear(n_embd, n_embd)
-        # self.proj = nn.Linear(head_seize * num_heads, n_embd)
+        
+        self.proj = nn.Linear(head_size * num_heads, n_embd)
         self.dropout = nn.Dropout(dropout)
     
 
     def forward(self, x):
         out = torch.cat([h(x) for h in self.heads], dim=-1)
-        out = self.proj(out)
+        out = self.dropout(self.proj(out))
         return out
 
 
@@ -265,7 +265,7 @@ print(sum(p.numel() for p in m.parameters())/1e6, 'M parameters')
 # print(decode(m.generate(idx = torch.zeros((1,1), dtype = torch.long), max_new_tokens=100)[0].tolist()))  
 
 
-optimizer = torch.optim.AdamW(m.parameters(), lr=learning_rate)
+optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
 for iter in range(max_iters):
     # For every fe interval we will evaluate model
