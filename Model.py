@@ -183,12 +183,7 @@ class BigramLanguageModel(nn.Module):
         #each token directly reads off the logits for the next token from Lookup table
         self.token_embeddings_table = nn.Embedding(vocab_size, n_embd)
         self.position_embeddings_table = nn.Embedding(block_size, n_embd)
-        self.blocks = nn.Sequential(
-            Block(n_embd, n_head=4),
-            Block(n_embd, n_head=4),
-            Block(n_embd, n_head=4),
-            nn.LayerNorm(n_layer)
-        )
+        self.blocks = nn.Sequential(*[Block(n_embd, n_head=n_head) for _ in range(n_layer)])
         self.ln_f = nn.LayerNorm(n_embd) # Final layer norm
         self.lm_head = nn.Linear(n_embd, vocab_size)
         # self.sa_head = MultiheadAttention(4,n_embd//4) ## i.e.  heads of 8 dimensional self-attention vectors
